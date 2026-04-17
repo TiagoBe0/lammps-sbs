@@ -1,6 +1,5 @@
 #include "SphericalHarmonics.h"
 #include <cmath>
-#include <stdexcept>
 
 SphericalHarmonics::SphericalHarmonics(int l_max) : l_max_(l_max) {
     int sz = (l_max + 1) * (l_max + 2) / 2;
@@ -40,9 +39,9 @@ void SphericalHarmonics::computeInto(double dx, double dy, double dz, double* ou
     // Compute unnormalized associated Legendre P_l^m for 0<=m<=l<=l_max
     // stored in plm[l*(l+1)/2 + m]
     const int plm_sz = (l_max_+1)*(l_max_+2)/2;
-    // Use a local vector. For performance-critical paths a pre-allocated
-    // thread-local buffer could be used, but for clarity we allocate here.
-    std::vector<double> plm(plm_sz, 0.0);
+    // thread_local avoids heap allocation on every call (hot path)
+    thread_local std::vector<double> plm;
+    plm.assign(plm_sz, 0.0);
 
     plm[0] = 1.0; // P_0^0
 
@@ -51,12 +50,6 @@ void SphericalHarmonics::computeInto(double dx, double dy, double dz, double* ou
         plm[(m+1)*(m+2)/2 + (m+1)] = -(2.0*m + 1.0) * sin_theta * plm[m*(m+1)/2 + m];
         // Superdiagonal: P_{m+1}^m = cos_theta*(2m+1)*P_m^m
         plm[(m+1)*(m+2)/2 + m] = cos_theta * (2.0*m + 1.0) * plm[m*(m+1)/2 + m];
-    }
-    // Last diagonal term if l_max > 0
-    if (l_max_ > 0) {
-        int m = l_max_;
-        // already done by the loop when m = l_max-1 -> P_{l_max}^{l_max} set
-        // and P_{l_max}^{l_max-1} set
     }
 
     // General recurrence for l >= m+2
@@ -68,8 +61,8 @@ void SphericalHarmonics::computeInto(double dx, double dy, double dz, double* ou
     }
 
     // Build trig recurrences: cos(m*phi), sin(m*phi)
-    // cos_phi_m[m] = cos(m*phi), sin_phi_m[m] = sin(m*phi)
-    std::vector<double> cp(l_max_+1), sp(l_max_+1);
+    thread_local std::vector<double> cp, sp;
+    cp.resize(l_max_+1); sp.resize(l_max_+1);
     cp[0] = 1.0; sp[0] = 0.0;
     for (int m = 0; m < l_max_; ++m) {
         cp[m+1] = cp[m]*cos_phi - sp[m]*sin_phi;

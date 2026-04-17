@@ -24,7 +24,6 @@ target_link_libraries(distool PRIVATE Eigen3::Eigen)
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(distool PRIVATE OpenMP::OpenMP_CXX)
-    target_compile_definitions(distool PRIVATE _OPENMP_ENABLED)
 endif()
 
 target_compile_options(distool PRIVATE

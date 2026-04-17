@@ -11,9 +11,8 @@ bool parseOneFrame(std::istream& in, Frame& frame) {
     // ITEM: TIMESTEP
     while (std::getline(in, line)) {
         if (line.find("ITEM: TIMESTEP") != std::string::npos) break;
-        if (in.eof()) return false;
     }
-    if (in.eof()) return false;
+    if (!in) return false;
     if (!std::getline(in, line)) return false;
     frame.timestep = std::stoi(line);
 
