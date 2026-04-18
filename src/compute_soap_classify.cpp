@@ -4,6 +4,7 @@
 
 #include "atom.h"
 #include "comm.h"
+#include <mpi.h>
 #include "error.h"
 #include "force.h"
 #include "memory.h"

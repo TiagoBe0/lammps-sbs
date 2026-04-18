@@ -9,6 +9,7 @@
 #include "modify.h"
 #include "update.h"
 
+#include <mpi.h>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -32,8 +33,9 @@ FixSOAPReference::FixSOAPReference(LAMMPS *lmp, int narg, char **arg)
 /* ---------------------------------------------------------------------- */
 int FixSOAPReference::setmask()
 {
-  // END_OF_RUN fires once when the run command finishes
-  return END_OF_RUN;
+  // end_of_run() is called unconditionally by Modify::end_of_run()
+  // on every fix that overrides it — no mask bit required.
+  return 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -69,9 +71,9 @@ void FixSOAPReference::end_of_run()
     for (int d = 0; d < dv_size; d++)
       local_sum[d] += arr[i][d];
 
-  long long local_natoms = static_cast<long long>(nlocal);
-  long long total_natoms = 0;
-  MPI_Allreduce(&local_natoms, &total_natoms, 1, MPI_LONG_LONG, MPI_SUM, world);
+  int local_natoms = nlocal;
+  int total_natoms = 0;
+  MPI_Allreduce(&local_natoms, &total_natoms, 1, MPI_INT, MPI_SUM, world);
 
   std::vector<double> mean_dv(dv_size);
   MPI_Allreduce(local_sum.data(), mean_dv.data(), dv_size,
@@ -122,7 +124,7 @@ void FixSOAPReference::end_of_run()
 
   if (comm->me == 0)
     utils::logmesg(lmp,
-                   "fix soap_reference: wrote '{}' (chi_k={:.3f}, chi_sigma={:.4f}, "
+                   "fix soap_reference: wrote '{}' (chi_k={:.3f} chi_sigma={:.4f} "
                    "{} atoms)\n",
                    outfile_, chi_k, chi_sigma, total_natoms);
 }

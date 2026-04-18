@@ -52,8 +52,11 @@ inline double chiProbNorm(double d, double k, double sigma)
   if (k <= 2.0 || sigma <= 0.0) return 1.0;
   const double d_peak = sigma * std::sqrt(k - 2.0);
   if (d_peak <= 0.0) return 1.0;
+  if (d <= 0.0) return 0.0;   // no neighbours → zero DV → maximum defect probability
   const double ratio    = d / d_peak;
   const double exp_term = -(d*d - d_peak*d_peak) / (2.0 * sigma * sigma);
+  // Guard against underflow on the exponential (very distorted environments)
+  if (exp_term < -700.0) return 0.0;
   return std::pow(ratio, k - 2.0) * std::exp(exp_term);
 }
 
