@@ -1,0 +1,141 @@
+# thermal_spike.lammps
+# ====================
+# Inelastic Thermal Spike (iTS) template for MeV heavy-ion irradiation.
+# Implements the two-temperature model approximation where electronic
+# energy is deposited instantaneously to the atomic subsystem.
+#
+# Based on: Prada et al., Eur. Phys. J. D 77, 18 (2023)
+#           Papaleo et al., Phys. Rev. Lett. 114, 118302 (2015)
+#
+# Typical parameters (1 MeV Au in Cu):
+#   Se      ≈ 50  eV/Å  (from SRIM/TRIM tables)
+#   sigma   ≈ 4–6 Å     (electron-phonon coupling radius)
+#
+# Usage:
+#   lmp -in thermal_spike.lammps \
+#       -var SE 50.0 -var SIGMA 5.0 -var SEED 777
+#
+# Requires: fix thermal_spike compiled into LAMMPS
+#   (copy fix_thermal_spike.h/.cpp to src/ and recompile)
+
+# ─── Variables ────────────────────────────────────────────────────────────────
+variable  SE       equal  50.0       # Electronic stopping power (eV/Å)
+variable  SIGMA    equal  5.0        # Transverse Gaussian width (Å)
+variable  SIGMA_L  equal  0.0        # Longitudinal width (0 = uniform)
+variable  SEED     equal  777
+variable  T0       equal  300        # Ambient temperature (K)
+
+variable  LATPARAM equal  3.615      # Cu FCC
+variable  BOX_HALF equal  80         # half-box (Å) — track must fit inside
+
+# ─── Initialization ───────────────────────────────────────────────────────────
+units     metal
+boundary  p p p
+atom_style atomic
+
+lattice   fcc ${LATPARAM}
+region    box block -${BOX_HALF} ${BOX_HALF} &
+                    -${BOX_HALF} ${BOX_HALF} &
+                    -${BOX_HALF} ${BOX_HALF}
+create_box  1 box
+create_atoms 1 box
+mass      1 63.546
+
+pair_style  eam
+pair_coeff  1 1 Cu_u3.eam
+
+# ─── Equilibration ────────────────────────────────────────────────────────────
+velocity   all create ${T0} ${SEED} dist gaussian
+fix        nvt_eq all nvt temp ${T0} ${T0} 0.1
+timestep   0.001
+thermo     500
+thermo_style custom step temp pe ke etotal
+
+run        5000
+unfix      nvt_eq
+reset_timestep 0
+
+# ─── Thermal Spike setup ──────────────────────────────────────────────────────
+# Ion track: centre of box along +z direction
+# Track entry: (0, 0, -BOX_HALF)    direction: (0, 0, 1)
+# Track length: 2*BOX_HALF Å  →  total energy = Se × Ltrack
+variable  LTRACK equal 2*${BOX_HALF}
+variable  E_keV  equal ${SE}*${LTRACK}/1000.0   # total deposited energy in keV
+
+print "Thermal spike: Se=${SE} eV/Å, Ltrack=${LTRACK} Å, E=${E_keV} keV, sigma=${SIGMA} Å"
+
+# Border thermostat: absorb energy at box edges
+variable  SHELL_IN equal ${BOX_HALF}-10
+region    bulk_region   block -${SHELL_IN} ${SHELL_IN} &
+                               -${SHELL_IN} ${SHELL_IN} &
+                               -${SHELL_IN} ${SHELL_IN}
+region    border_region block -${BOX_HALF} ${BOX_HALF} &
+                               -${BOX_HALF} ${BOX_HALF} &
+                               -${BOX_HALF} ${BOX_HALF} &
+          side out
+
+group     border_atoms  region border_region
+group     spike_atoms   region bulk_region
+
+fix  border_nvt border_atoms nvt temp ${T0} ${T0} 0.1
+fix  spike_nve  spike_atoms  nve
+
+# ─── Apply thermal spike ──────────────────────────────────────────────────────
+# fix ID group thermal_spike Se Ltrack x0 y0 z0 ux uy uz sigma [sigma_long v]
+fix  spike all thermal_spike &
+     ${SE} ${LTRACK} &
+     0.0 0.0 -${BOX_HALF} &
+     0.0 0.0 1.0           &
+     ${SIGMA}              &
+     sigma_long ${SIGMA_L} &
+     seed ${SEED}
+
+# ─── Thermal spike evolution ──────────────────────────────────────────────────
+# Phase 1: fast thermalisation of hot track (~1 ps, small dt)
+timestep   0.0005
+thermo     200
+thermo_style custom step temp pe ke etotal
+
+run  2000   # 1 ps
+
+# Phase 2: thermal diffusion and defect annealing (~50 ps)
+timestep   0.001
+run  50000  # 50 ps
+
+# Phase 3: recovery at ambient temperature
+unfix  spike_nve
+unfix  border_nvt
+fix    quench all nvt temp ${T0} ${T0} 0.1
+timestep 0.001
+run    10000
+
+unfix  quench
+reset_timestep 0
+
+# ─── Computes + Final dump for ML analysis ────────────────────────────────────
+compute  fv   all local_freevol  4.0 thresh 0.25 vcut 4.0
+compute  desc all local_descriptor 4.0 4 6 average yes
+
+dump fv_dump all custom 1 dump.spike.fv id type x y z &
+     c_fv[1] c_fv[2] c_fv[3] c_fv[4]
+dump_modify fv_dump sort id
+
+dump desc_dump all custom 1 dump.spike.desc id type x y z &
+     c_desc[1] c_desc[2] c_desc[3] c_desc[4] &
+     c_desc[5] c_desc[6] c_desc[7] c_desc[8]
+dump_modify desc_dump sort id
+
+run  0   # single snapshot
+
+# ─── Intermediate snapshots during evolution ─────────────────────────────────
+# To capture dynamics during the spike, add before Phase 1:
+#
+# dump evolve_fv all custom 200 dump.spike.evolve.fv id type x y z &
+#      c_fv[1] c_fv[2] c_fv[3] c_fv[4]
+#
+# Then post-process each frame with:
+#   for f in 0 200 400 ...; do
+#     python cascade_pipeline.py --mode analyse \
+#         --fv dump.spike.evolve.fv --frame $((f/200)) \
+#         --stats spike_stats_step${f}.csv
+#   done

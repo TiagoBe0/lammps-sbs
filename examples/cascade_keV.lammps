@@ -1,0 +1,167 @@
+# cascade_keV.lammps
+# ==================
+# Radiation damage cascade template for keV range PKA (Primary Knock-on Atom).
+# Based on methodology from Deluigi et al., Acta Mater. 213, 116951 (2021).
+#
+# Workflow:
+#   1. Build and equilibrate FCC/BCC or HEA sample
+#   2. Add ZBL repulsive potential at short range (hybrid/overlay)
+#   3. Give the PKA its initial kinetic energy
+#   4. Run with adaptive timestep (LAMMPS fix dt/reset)
+#   5. Thermostat borders to absorb heat
+#   6. Quench and dump for ML analysis
+#
+# Usage:
+#   lmp -in cascade_keV.lammps -var PKA_ENERGY 10 -var SEED 12345
+#
+# Then analyse:
+#   python cascade_pipeline.py --mode analyse \
+#       --fv dump.cascade.fv --desc dump.cascade.desc --stats cascade_stats.csv
+
+# ─── Variables ────────────────────────────────────────────────────────────────
+variable  PKA_ENERGY  equal  10        # PKA energy in keV (override with -var)
+variable  SEED        equal  12345     # RNG seed
+variable  T0          equal  300       # initial temperature (K)
+variable  MATERIAL    string "fcc"     # lattice type: fcc or bcc
+variable  LATPARAM    equal  3.615     # lattice parameter (Å), Cu FCC default
+
+# Box size: large enough to contain the full cascade
+# Rule of thumb: cascade radius ~ (E_PKA / 10 keV)^(1/3) × 6 nm
+variable  BOX_HALF   equal  50        # half-box size (Å) — adjust for high E
+
+# ─── Initialization ───────────────────────────────────────────────────────────
+units     metal
+boundary  p p p
+atom_style atomic
+
+lattice   ${MATERIAL} ${LATPARAM}
+region    box block -${BOX_HALF} ${BOX_HALF} &
+                    -${BOX_HALF} ${BOX_HALF} &
+                    -${BOX_HALF} ${BOX_HALF}
+create_box  1 box
+create_atoms 1 box
+mass      1 63.546   # Cu
+
+# ─── Interatomic potential ────────────────────────────────────────────────────
+# Hybrid: EAM for equilibrium + ZBL screened Coulomb for close encounters.
+# ZBL parameters: atomic numbers of projectile and target.
+# For Cu self-irradiation: Z1=Z2=29, a (screening length) auto-computed by LAMMPS.
+#
+pair_style  hybrid/overlay eam zbl 0.5 2.5
+pair_coeff  1 1 eam  Cu_u3.eam          # adjust path
+pair_coeff  1 1 zbl  29 29              # Cu-Cu ZBL (Z=29)
+
+# ─── Equilibration ────────────────────────────────────────────────────────────
+velocity   all create ${T0} ${SEED} dist gaussian
+fix        nvt_eq all nvt temp ${T0} ${T0} 0.1
+timestep   0.001
+thermo     500
+thermo_style custom step temp pe ke etotal press
+
+run        5000
+unfix      nvt_eq
+reset_timestep 0
+
+# ─── Select PKA ───────────────────────────────────────────────────────────────
+# Choose the atom closest to the box centre as PKA.
+variable  cx equal  0.0
+variable  cy equal  0.0
+variable  cz equal  0.0
+
+# Find atom nearest to centre using a small region
+region    pka_region sphere ${cx} ${cy} ${cz} 2.0 units box
+group     pka_group region pka_region
+
+# If no atom in 2 Å radius, expand to 4 Å
+# (simple approach: use the first atom found in the region)
+# For production use, select a specific atom id for reproducibility.
+
+# PKA direction: <135> equivalent — avoid channeling axes for realistic damage
+variable  PKA_VX equal  1.0
+variable  PKA_VY equal  1.0
+variable  PKA_VZ equal -1.0
+
+# PKA kinetic energy → velocity conversion
+# KE = ½ m v²  →  v = sqrt(2 KE / m)
+# In LAMMPS metal units: KE in eV, mass in g/mol, v in Å/ps
+# v (Å/ps) = sqrt(2 × KE(eV) × 9648.5 / mass(g/mol))
+# 9648.5 = 1000 × eV/kJ × 1/(1 g/mol × 1 Å/ps²) conversion factor
+variable  PKA_SPEED equal  sqrt(2.0*${PKA_ENERGY}*1000.0*9648.5/63.546)
+
+# Normalise direction
+variable  PKA_NORM equal  sqrt(v_PKA_VX^2+v_PKA_VY^2+v_PKA_VZ^2)
+variable  PKA_VX_N equal  v_PKA_VX/v_PKA_NORM
+variable  PKA_VY_N equal  v_PKA_VY/v_PKA_NORM
+variable  PKA_VZ_N equal  v_PKA_VZ/v_PKA_NORM
+
+velocity  pka_group set &
+    $(v_PKA_SPEED*v_PKA_VX_N) &
+    $(v_PKA_SPEED*v_PKA_VY_N) &
+    $(v_PKA_SPEED*v_PKA_VZ_N) units box
+
+# ─── Border thermostat ────────────────────────────────────────────────────────
+# Cool the outermost 8 Å shell to absorb cascade heat.
+variable  SHELL_IN equal ${BOX_HALF}-8
+region    bulk_region  block -${SHELL_IN} ${SHELL_IN} &
+                             -${SHELL_IN} ${SHELL_IN} &
+                             -${SHELL_IN} ${SHELL_IN}
+region    border_region block -${BOX_HALF} ${BOX_HALF} &
+                              -${BOX_HALF} ${BOX_HALF} &
+                              -${BOX_HALF} ${BOX_HALF} &
+          side out
+
+group     border_atoms region border_region
+group     cascade_atoms region bulk_region
+
+fix       border_nvt border_atoms nvt temp ${T0} ${T0} 0.1
+fix       cascade_nve cascade_atoms nve
+
+# ─── Adaptive timestep ────────────────────────────────────────────────────────
+# Limit maximum displacement per step to 0.1 Å during high-energy phase.
+fix       dt_adapt all dt/reset 1 0.0001 0.01 0.1 units box
+timestep  0.0001   # start with very small dt for PKA
+
+# ─── Descriptors during cascade ───────────────────────────────────────────────
+compute   fv   all local_freevol  4.0 thresh 0.25 vcut 4.0
+compute   desc all local_descriptor 4.0 4 6 average yes
+
+# ─── Cascade run ──────────────────────────────────────────────────────────────
+thermo     100
+thermo_style custom step dt temp pe ke etotal
+
+# Phase 1: ballistic phase (PKA slows down), ~5 ps
+run        5000
+
+# Phase 2: thermal spike / recombination, ~20 ps
+run        20000
+
+# ─── Post-cascade quench ──────────────────────────────────────────────────────
+unfix  cascade_nve
+unfix  border_nvt
+unfix  dt_adapt
+fix    quench all nvt temp ${T0} ${T0} 0.1
+timestep 0.001
+run    5000
+unfix  quench
+
+reset_timestep 0
+
+# ─── Final dump for ML analysis ───────────────────────────────────────────────
+# Free-volume dump
+dump fv_dump all custom 1 dump.cascade.fv id type x y z &
+     c_fv[1] c_fv[2] c_fv[3] c_fv[4]
+dump_modify fv_dump sort id
+
+# Descriptor dump
+dump desc_dump all custom 1 dump.cascade.desc id type x y z &
+     c_desc[1] c_desc[2] c_desc[3] c_desc[4] &
+     c_desc[5] c_desc[6] c_desc[7] c_desc[8]
+dump_modify desc_dump sort id
+
+run 0   # write a single snapshot
+
+# ─── Post-processing (run from shell after simulation) ────────────────────────
+# python cascade_pipeline.py --mode analyse \
+#     --fv dump.cascade.fv --desc dump.cascade.desc \
+#     --som som_trained.pkl --stats cascade_${PKA_ENERGY}keV_stats.csv \
+#     --plot-fv cascade_fv.png --plot-dist cascade_dist.png
