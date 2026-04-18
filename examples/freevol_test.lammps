@@ -1,0 +1,72 @@
+# Example: compute local_freevol + compute local_descriptor together
+# Tests vacancy identification in FCC Cu with a radiation-damage cascade.
+#
+# Usage:  lmp -in freevol_test.lammps
+# Output: dump.combined  (positions + free-volume + Steinhardt descriptors)
+#         Then run: python vacancy_analysis.py dump.fv --desc dump.desc --plot
+
+units         metal
+boundary      p p p
+atom_style    atomic
+
+# ─── Geometry ────────────────────────────────────────────────────────────────
+lattice       fcc 3.615
+region        box block 0 10 0 10 0 10
+create_box    1 box
+create_atoms  1 box
+mass          1 63.546
+
+# ─── Potential ────────────────────────────────────────────────────────────────
+pair_style    eam
+pair_coeff    1 1 Cu_u3.eam
+
+# ─── Introduce a vacancy manually for testing ─────────────────────────────────
+# Remove one atom near the centre
+region        centre sphere 18.0 18.0 18.0 2.0
+delete_atoms  region centre
+
+# ─── Equilibrate ─────────────────────────────────────────────────────────────
+velocity      all create 300 12345 dist gaussian
+fix           nvt all nvt temp 300 300 0.1
+timestep      0.001
+thermo        200
+run           2000
+unfix         nvt
+reset_timestep 0
+
+# ─── Computes ─────────────────────────────────────────────────────────────────
+# Free-volume compute:
+#   cutoff 3.8 Å   threshold 0.25 (25% excess volume)
+#   clustering cutoff vcut 3.8 Å
+compute fv   all local_freevol 3.8 thresh 0.25 vcut 3.8
+
+# Steinhardt descriptor compute (l=4,6, averaged):
+compute desc all local_descriptor 3.8 4 6 average yes
+
+# ─── Dumps ───────────────────────────────────────────────────────────────────
+# Separate dumps for each compute (for vacancy_analysis.py --desc option)
+dump fv_dump all custom 500 dump.fv id type x y z &
+     c_fv[1] c_fv[2] c_fv[3] c_fv[4]
+dump_modify fv_dump sort id
+
+dump desc_dump all custom 500 dump.desc id type x y z &
+     c_desc[1] c_desc[2] c_desc[3] c_desc[4] &
+     c_desc[5] c_desc[6] c_desc[7] c_desc[8]
+dump_modify desc_dump sort id
+
+# ─── Production ──────────────────────────────────────────────────────────────
+fix   npt all npt temp 300 300 0.1 iso 0 0 1.0
+thermo_style  custom step temp pe press vol
+run   5000
+
+# ─── Expected output ──────────────────────────────────────────────────────────
+# dump.fv columns  : id type x y z V_local dV is_vacancy cluster_id
+# dump.desc columns: id type x y z Q4 W4 Q4b W4b Q6 W6 Q6b W6b
+#
+# Post-process with:
+#   python vacancy_analysis.py dump.fv \
+#       --desc dump.desc --som som_trained.pkl \
+#       --stats cluster_stats.csv --plot
+#
+# Reference: atoms around vacancy → V_local ≈ 1.25 × V_bulk
+#            bulk FCC Cu at 300 K  → V_bulk ≈ 11.8 Å³ per atom
