@@ -1,0 +1,109 @@
+# BCC Fe radiation damage workflow using SOAP defect classification
+#
+# Step 1 – equilibrate pristine crystal  → builds ref_params.dat
+# Step 2 – PKA cascade                   → per-atom SOAP classification every 100 steps
+#
+# Usage:
+#   lmp -in bcc_fe_cascade.lammps
+#
+# Required files:
+#   Fe_mm.eam.fs   (Mendelev 2003 EAM potential, available from NIST)
+#
+# Compile LAMMPS with the extra source files from src/:
+#   cp ../src/soap_*.h ../src/compute_soap_*.{h,cpp} \
+#      ../src/fix_soap_reference.{h,cpp} <lammps>/src/
+#   cd <lammps> && cmake -B build && cmake --build build -j$(nproc)
+
+# -------------------------------------------------------------------------
+# COMMON SETTINGS
+# -------------------------------------------------------------------------
+units        metal
+atom_style   atomic
+boundary     p p p
+
+variable  a0      equal  2.855   # Fe BCC lattice constant [Å]
+variable  rcut    equal  5.5     # SOAP cutoff (covers 1NN + 2NN shells)
+variable  nmax    equal  9
+variable  lmax    equal  9
+variable  thresh  equal  0.15    # dist_to_ref threshold for Lattice/Defect
+
+# -------------------------------------------------------------------------
+# STEP 1 – EQUILIBRATION  (builds reference SOAP fingerprint)
+# -------------------------------------------------------------------------
+label equilibration
+
+lattice      bcc ${a0}
+region       box block 0 10 0 10 0 10  # 10x10x10 supercell = 2000 atoms
+create_box   1 box
+create_atoms 1 box
+
+mass         1 55.845
+
+pair_style   eam/fs
+pair_coeff   * * Fe_mm.eam.fs Fe
+
+# Thermalise at 300 K
+velocity     all create 300.0 87287 mom yes rot yes
+fix          nvt all nvt temp 300.0 300.0 $(100.0*dt)
+timestep     0.001
+
+thermo       500
+run          5000                # 5 ps equilibration
+
+# Build SOAP reference from the final snapshot
+compute      dv_ref all soap_descriptor ${rcut} ${nmax} ${lmax}
+fix          ref    all soap_reference  dv_ref ref_params.dat
+run          0                   # end_of_run fires here → writes ref_params.dat
+unfix        ref
+uncompute    dv_ref
+unfix        nvt
+
+write_data   pristine.lammps     # save equilibrated structure
+
+print "Reference file written to ref_params.dat"
+
+# -------------------------------------------------------------------------
+# STEP 2 – PKA CASCADE
+# -------------------------------------------------------------------------
+label cascade
+
+reset_timestep 0
+
+# PKA: give atom 1 a 10 keV recoil along <110>
+variable  pka_ke   equal  10000.0             # [eV]
+variable  pka_mass equal  mass[1]
+variable  pka_v    equal  sqrt(2.0*v_pka_ke*1.60218e-19 / (v_pka_mass*1.6605e-27)) * 1e-5
+
+velocity     1 set $(v_pka_v/sqrt(2)) $(v_pka_v/sqrt(2)) 0.0 units box
+
+# ZBL repulsion at short range + EAM at long range
+pair_style   hybrid/overlay eam/fs zbl 0.5 1.5
+pair_coeff   * * eam/fs Fe_mm.eam.fs Fe
+pair_coeff   1 1 zbl 26 26
+
+# Adaptive timestep: keep max displacement < 0.05 Å
+fix          nve    all nve
+fix          dt     all dt/reset 1 1.0e-4 0.01 0.05 units box
+
+# Langevin border thermostat (outermost 5 Å of each face)
+region       bulk   block INF INF INF INF INF INF units box
+region       border subtract EDGE bulk
+fix          lang   border langevin 300.0 300.0 $(100.0*dt) 98734
+
+# SOAP classification every 100 steps
+compute      cls    all soap_classify ref_params.dat ${rcut} ${nmax} ${lmax} &
+                    threshold ${thresh}
+
+dump         1 all custom 100 cascade_dump.*.lammps &
+             id type x y z &
+             c_cls[1] c_cls[2] c_cls[3]
+dump_modify  1 sort id label "dist_to_ref defect_prob defect_type"
+
+thermo_style custom step temp etotal ke pe
+thermo       100
+
+run          5000               # 5000 adaptive steps ≈ few ps of cascade
+
+# Summary: count defects in final frame
+variable  n_defect equal count(all,c_cls[3] > 0.5)
+print "Defect atoms in final frame: ${n_defect}"
