@@ -90,16 +90,23 @@ region       bulk   block INF INF INF INF INF INF units box
 region       border subtract EDGE bulk
 fix          lang   border langevin 300.0 300.0 $(100.0*dt) 98734
 
-# SOAP classification every 100 steps
+# SOAP defect classification (per-atom: dist_to_ref, defect_prob, defect_type)
 compute      cls    all soap_classify ref_params.dat ${rcut} ${nmax} ${lmax} &
                     threshold ${thresh}
+
+# Grid-based vacancy detection (global: n_vac_pts, void_vol, n_clusters)
+# vac_dist ≈ 0.43 * a0 for BCC Fe  (half the 1NN distance = 1.24 Å)
+compute      vac    all soap_vacancy 1.24 grid 0.4 cluster_radius 2.5 &
+                    file vacancies.csv
 
 dump         1 all custom 100 cascade_dump.*.lammps &
              id type x y z &
              c_cls[1] c_cls[2] c_cls[3]
 dump_modify  1 sort id label "dist_to_ref defect_prob defect_type"
 
-thermo_style custom step temp etotal ke pe
+# Print defect + vacancy summary to thermo output every 100 steps
+thermo_style custom step temp etotal c_cls[3] c_vac[3]
+#                                    ^defect atoms  ^vacancy clusters
 thermo       100
 
 run          5000               # 5000 adaptive steps ≈ few ps of cascade
