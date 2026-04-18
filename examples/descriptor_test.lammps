@@ -1,0 +1,69 @@
+# Example: compute local_descriptor on an FCC Cu crystal
+# Tests Q4/W4/Q6/W6 (local and neighbour-averaged) at different deformation states.
+#
+# Usage:  lmp -in descriptor_test.lammps
+# Requires: EAM potential for Cu (e.g. Cu_u3.eam from LAMMPS potentials/)
+
+# ─── Initialization ──────────────────────────────────────────────────────────
+units         metal
+boundary      p p p
+atom_style    atomic
+
+# ─── Geometry ────────────────────────────────────────────────────────────────
+lattice       fcc 3.615          # Cu lattice constant (Å)
+region        box block 0 6 0 6 0 6
+create_box    1 box
+create_atoms  1 box
+
+mass          1 63.546
+
+# ─── Interatomic potential ────────────────────────────────────────────────────
+pair_style    eam
+pair_coeff    1 1 Cu_u3.eam     # adjust path to your .eam file
+
+# ─── Equilibration ───────────────────────────────────────────────────────────
+thermo        100
+thermo_style  custom step temp pe ke etotal press
+
+velocity      all create 300.0 12345 dist gaussian
+fix           nvt all nvt temp 300 300 0.1
+timestep      0.001
+
+run           2000
+unfix         nvt
+
+reset_timestep 0
+
+# ─── Descriptor compute ──────────────────────────────────────────────────────
+# Syntax: compute ID group local_descriptor cutoff l1 [l2 ...] [average yes|no]
+#
+# cutoff = 3.8 Å  (between 1st and 2nd neighbour shell for Cu FCC)
+# l = 4, 6        (standard for distinguishing FCC / BCC / HCP / amorphous)
+# average yes     (Lechner-Dellago averaged version – more robust to deformation)
+#
+# Output columns (8 total):
+#   1: Q4      2: Wh4      3: Q4_bar   4: Wh4_bar
+#   5: Q6      6: Wh6      7: Q6_bar   8: Wh6_bar
+
+compute desc all local_descriptor 3.8 4 6 average yes
+
+# ─── Dump atom data + descriptors ────────────────────────────────────────────
+dump dump_desc all custom 500 dump.desc id type x y z &
+     c_desc[1] c_desc[2] c_desc[3] c_desc[4] &
+     c_desc[5] c_desc[6] c_desc[7] c_desc[8]
+dump_modify dump_desc sort id
+
+# ─── Production run (with uniaxial deformation) ──────────────────────────────
+fix  npt all npt temp 300 300 0.1 x 0 0 1.0 y 0 0 1.0
+fix  def all deform 1 z erate 1.0e-4 units box   # 10% strain/ps
+
+thermo_style  custom step temp pe press pzz lz
+
+run 10000
+
+# ─── Expected descriptor values for reference structures (Cu FCC) ─────────────
+# Structure   Q4       W4_hat   Q6       W6_hat
+# FCC         0.191   -0.159   0.574   -0.013
+# HCP         0.097   -0.134   0.485   -0.012
+# BCC         0.036    0.159   0.511    0.013
+# Amorphous   ~0.05    ~0.0    ~0.35    ~0.0
