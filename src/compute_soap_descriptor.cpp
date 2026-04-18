@@ -112,14 +112,29 @@ void ComputeSOAPDescriptor::compute_peratom()
   int    *numneigh   = list->numneigh;
   int   **firstneigh = list->firstneigh;
 
-  // Per-call scratch (reused across atoms – serial within compute_peratom)
-  std::vector<double> c_buf(n_max_ * sh_size_);
-  std::vector<double> rb_buf(n_max_);
-  std::vector<double> sh_buf(sh_size_);
-
-  for (int i = 0; i < nlocal; i++)
-    computeAtom(i, x, numneigh, firstneigh,
-                c_buf.data(), rb_buf.data(), sh_buf.data());
+  // Each OpenMP thread gets its own scratch buffers; no data races on
+  // array_atom because threads write to disjoint rows (different i).
+#if defined(_OPENMP)
+#pragma omp parallel
+  {
+    std::vector<double> c_buf(n_max_ * sh_size_);
+    std::vector<double> rb_buf(n_max_);
+    std::vector<double> sh_buf(sh_size_);
+#pragma omp for schedule(dynamic, 32)
+    for (int i = 0; i < nlocal; i++)
+      computeAtom(i, x, numneigh, firstneigh,
+                  c_buf.data(), rb_buf.data(), sh_buf.data());
+  }
+#else
+  {
+    std::vector<double> c_buf(n_max_ * sh_size_);
+    std::vector<double> rb_buf(n_max_);
+    std::vector<double> sh_buf(sh_size_);
+    for (int i = 0; i < nlocal; i++)
+      computeAtom(i, x, numneigh, firstneigh,
+                  c_buf.data(), rb_buf.data(), sh_buf.data());
+  }
+#endif
 }
 
 /* ---------------------------------------------------------------------- */

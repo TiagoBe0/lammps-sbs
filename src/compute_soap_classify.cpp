@@ -172,20 +172,39 @@ void ComputeSOAPClassify::compute_peratom()
   int    *numneigh   = list->numneigh;
   int   **firstneigh = list->firstneigh;
 
-  std::vector<double> c_buf(n_max_ * sh_size_);
-  std::vector<double> rb_buf(n_max_);
-  std::vector<double> sh_buf(sh_size_);
-  std::vector<double> dv_buf(dv_size_);
-
-  for (int i = 0; i < nlocal; i++) {
-    const double d = computeAndClassify(
-        i, x, numneigh, firstneigh,
-        c_buf.data(), rb_buf.data(), sh_buf.data(), dv_buf.data());
-
-    array_atom[i][0] = d;
-    array_atom[i][1] = 1.0 - SOAP::chiProbNorm(d, chi_k_, chi_sigma_);
-    array_atom[i][2] = (d < threshold_) ? 0.0 : 1.0;
+#if defined(_OPENMP)
+#pragma omp parallel
+  {
+    std::vector<double> c_buf(n_max_ * sh_size_);
+    std::vector<double> rb_buf(n_max_);
+    std::vector<double> sh_buf(sh_size_);
+    std::vector<double> dv_buf(dv_size_);
+#pragma omp for schedule(dynamic, 32)
+    for (int i = 0; i < nlocal; i++) {
+      const double d = computeAndClassify(
+          i, x, numneigh, firstneigh,
+          c_buf.data(), rb_buf.data(), sh_buf.data(), dv_buf.data());
+      array_atom[i][0] = d;
+      array_atom[i][1] = 1.0 - SOAP::chiProbNorm(d, chi_k_, chi_sigma_);
+      array_atom[i][2] = (d < threshold_) ? 0.0 : 1.0;
+    }
   }
+#else
+  {
+    std::vector<double> c_buf(n_max_ * sh_size_);
+    std::vector<double> rb_buf(n_max_);
+    std::vector<double> sh_buf(sh_size_);
+    std::vector<double> dv_buf(dv_size_);
+    for (int i = 0; i < nlocal; i++) {
+      const double d = computeAndClassify(
+          i, x, numneigh, firstneigh,
+          c_buf.data(), rb_buf.data(), sh_buf.data(), dv_buf.data());
+      array_atom[i][0] = d;
+      array_atom[i][1] = 1.0 - SOAP::chiProbNorm(d, chi_k_, chi_sigma_);
+      array_atom[i][2] = (d < threshold_) ? 0.0 : 1.0;
+    }
+  }
+#endif
 }
 
 /* ---------------------------------------------------------------------- */
